@@ -183,6 +183,20 @@ class TestBarcodePrintManager(FrappeTestCase):
 			"supplier_type": "Company",
 		}).insert(ignore_permissions=True).name
 
+	def _get_or_create_price_list(self):
+		"""A dev bench that's run the setup wizard already has the standard
+		Buying/Selling Price Lists; a fresh CI site has none - create a
+		minimal selling one rather than assuming it exists."""
+		existing = frappe.get_all("Price List", filters={"selling": 1}, limit=1)
+		if existing:
+			return existing[0].name
+		return frappe.get_doc({
+			"doctype": "Price List",
+			"price_list_name": "_Test Price List",
+			"selling": 1,
+			"currency": "INR",
+		}).insert(ignore_permissions=True).name
+
 	def test_autofetch_case1_barcode_available(self):
 		"""Case 1: Item with barcode in Item Master -> resolve_row auto-fetches
 		Item Name, UOM, Barcode, Barcode Type."""
@@ -758,13 +772,23 @@ class TestBarcodePrintManager(FrappeTestCase):
 		company = self._get_or_create_company()
 		template = self._create_item_tax_template(company, 10)
 		item_code = self._create_test_item_with_barcode()
-		price_list = frappe.get_all("Price List", limit=1)[0].name
-		frappe.get_doc({
-			"doctype": "Item Price",
-			"item_code": item_code,
-			"price_list": price_list,
-			"price_list_rate": 200,
-		}).insert(ignore_permissions=True)
+		price_list = self._get_or_create_price_list()
+		# Item.after_insert() auto-creates an Item Price from standard_rate
+		# for whichever Price List is the default Selling one at that
+		# moment - if that's the same list resolved above, update it
+		# in place instead of inserting a conflicting duplicate row.
+		existing_price = frappe.db.get_value(
+			"Item Price", {"item_code": item_code, "price_list": price_list}, "name"
+		)
+		if existing_price:
+			frappe.db.set_value("Item Price", existing_price, "price_list_rate", 200)
+		else:
+			frappe.get_doc({
+				"doctype": "Item Price",
+				"item_code": item_code,
+				"price_list": price_list,
+				"price_list_rate": 200,
+			}).insert(ignore_permissions=True)
 
 		rate, note = get_item_rate_and_note(item_code, price_list, "")
 		self.assertEqual(rate, 200)
