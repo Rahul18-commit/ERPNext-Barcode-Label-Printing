@@ -690,25 +690,53 @@ class TestBarcodePrintManager(FrappeTestCase):
 		zpl_with_price = build_label_zpl(row_with_price, settings, "Medium")
 		self.assertIn(frappe.utils.fmt_money(10), zpl_with_price)
 
+	def _ensure_leaf_tax_accounts(self, company, count):
+		"""At least `count` non-group Tax accounts for `company`. A fresh
+		CI site's default "Standard" Chart of Accounts (Company.chart_of_accounts
+		defaults to "Standard" regardless of Country - see company.py
+		validate_coa_input) creates exactly one Tax-type account, "Duties
+		and Taxes", and it's a group account - so there's no leaf Tax
+		account to use until one is created here."""
+		existing = frappe.get_all(
+			"Account",
+			filters={"company": company, "is_group": 0, "account_type": "Tax"},
+			fields=["name"],
+			limit=count,
+		)
+		if len(existing) >= count:
+			return [a.name for a in existing]
+
+		parent = frappe.db.get_value(
+			"Account", {"company": company, "account_type": "Tax", "is_group": 1}, "name"
+		) or frappe.db.get_value(
+			"Account", {"company": company, "is_group": 1, "root_type": "Liability"}, "name"
+		)
+
+		for i in range(len(existing), count):
+			acc = frappe.get_doc({
+				"doctype": "Account",
+				"account_name": f"Test Tax {i + 1} {frappe.generate_hash(length=4)}",
+				"company": company,
+				"parent_account": parent,
+				"is_group": 0,
+				"account_type": "Tax",
+			}).insert(ignore_permissions=True)
+			existing.append(frappe._dict(name=acc.name))
+		return [a.name for a in existing]
+
 	def _create_item_tax_template(self, company, total_rate):
 		"""A minimal Item Tax Template for `company` whose detail rows sum
 		to `total_rate` percent - split across two distinct Tax accounts
 		(CGST/SGST-style) when more than one exists, otherwise one row -
 		ERPNext rejects the same account appearing twice in one template."""
-		accounts = frappe.get_all(
-			"Account",
-			filters={"company": company, "is_group": 0, "account_type": "Tax"},
-			limit=2,
-		)
-		if not accounts:
-			frappe.throw(f"No Tax account found for {company} - cannot build a test Item Tax Template.")
+		accounts = self._ensure_leaf_tax_accounts(company, 2)
 		if len(accounts) >= 2:
 			taxes = [
-				{"tax_type": accounts[0].name, "tax_rate": total_rate / 2},
-				{"tax_type": accounts[1].name, "tax_rate": total_rate / 2},
+				{"tax_type": accounts[0], "tax_rate": total_rate / 2},
+				{"tax_type": accounts[1], "tax_rate": total_rate / 2},
 			]
 		else:
-			taxes = [{"tax_type": accounts[0].name, "tax_rate": total_rate}]
+			taxes = [{"tax_type": accounts[0], "tax_rate": total_rate}]
 		return frappe.get_doc({
 			"doctype": "Item Tax Template",
 			"title": f"Test Tax {total_rate}% {frappe.generate_hash(length=4)}",
